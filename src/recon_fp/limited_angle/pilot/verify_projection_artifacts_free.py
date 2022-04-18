@@ -88,7 +88,7 @@ def riess_weighting(
 device = 0
 img_norm = 0.019
 islice = 80
-nangles = 0.33333
+nangles = 0.333
 geometry = os.path.join(input_data_dir, 'lowdoseCTsets/geometry.cfg')
 input_filename = os.path.join(input_data_dir, 'lowdoseCTsets/L291_full_sino.mat')
 
