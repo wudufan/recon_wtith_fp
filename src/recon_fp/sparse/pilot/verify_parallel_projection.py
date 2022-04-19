@@ -15,6 +15,7 @@ import ct_projector.projector.numpy.parallel as ct_para
 
 import ct_projector.projector.cupy as ct_projector_cp
 import ct_projector.projector.cupy.parallel as ct_para_cp
+import ct_projector.prior.cupy as ct_prior_cp
 import ct_projector.recon.cupy as ct_recon_cp
 
 from recon_fp.sparse.locations import input_data_dir
@@ -36,6 +37,19 @@ with h5py.File(input_filename, 'r') as f:
 print('Done')
 prj = prjs[..., [islice], :]
 
+
+# %%
+def mask_fov(img, fov_size):
+    xx, yy = np.meshgrid(np.arange(0, img.shape[2]), np.arange(0, img.shape[3]))
+    cx = img.shape[2] / 2
+    cy = img.shape[3] / 2
+    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    mask = np.where(dist < fov_size / 2, 1, 0)
+    img = img * mask[np.newaxis, np.newaxis]
+
+    return img.astype(np.float32)
+
+
 # %%
 # reconstruction
 ct_projector.set_device(0)
@@ -55,6 +69,8 @@ projector_para.from_file(geometry)
 projector_para.nz = 1
 projector_para.nv = 1
 projector_para.du = projector_para.du * projector_para.dso / projector_para.dsd
+fov_size = projector_para.du * projector_para.nu / projector_para.dx
+ref = mask_fov(ref, fov_size)
 
 prj_ref = ct_para.distance_driven_fp(projector_para, ref, angles)
 fprj = ct_para.ramp_filter(projector_para, prj_ref, 'hann')
@@ -64,21 +80,7 @@ prj_sparse = ct_para.distance_driven_fp(projector_para, ref, angles_sparse)
 fprj = ct_para.ramp_filter(projector_para, prj_sparse, 'hann')
 img_sparse = ct_para.distance_driven_bp(projector_para, fprj, angles_sparse, True)
 
-
 # %%
-def mask_fov(img, fov_size):
-    xx, yy = np.meshgrid(np.arange(0, img.shape[2]), np.arange(0, img.shape[3]))
-    cx = img.shape[2] / 2
-    cy = img.shape[3] / 2
-    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-    mask = np.where(dist < fov_size / 2, 1, 0)
-    img = img * mask[np.newaxis, np.newaxis]
-
-    return img.astype(np.float32)
-
-
-# %%
-fov_size = projector_para.du * projector_para.nu / projector_para.dx
 img_sparse = mask_fov(img_sparse, fov_size)
 
 # %%
@@ -184,8 +186,8 @@ for i in range(1000):
     prj_recon = prj_recon - prj_diff * step_size / mat_norm
     step_size *= alpha
 
-    if (i + 1) % 10 == 0:
-        print(np.sqrt(np.mean(diff[0, 0, margin:-margin, margin:-margin]**2)))
+    if (i + 1) % 100 == 0:
+        print(i + 1, np.sqrt(np.mean(diff[0, 0, margin:-margin, margin:-margin]**2)))
 
 # %%
 plt.figure(figsize=[16, 12])
@@ -225,13 +227,15 @@ for i in range(1000):
         print(i + 1, end=',', flush=True)
     recon_cp, nesterov_cp = ct_recon_cp.nesterov_acceleration(
         ct_recon_cp.sqs_gaussian_one_step,
+        recon_kwargs={
+            'projector': projector_cp,
+            'prj': fp_cp,
+            'norm_img': norm_img_cp,
+            'projector_norm': 1,
+            'beta': 0
+        },
         img=recon_cp,
         img_nesterov=nesterov_cp,
-        projector=projector_cp,
-        prj=fp_cp,
-        norm_img=norm_img_cp,
-        projector_norm=1,
-        beta=0
     )
 print('')
 recon_ir = recon_cp.get()
@@ -244,7 +248,84 @@ plt.subplot(222)
 plt.imshow(img_sparse[0, 0, margin:-margin, margin:-margin], 'gray', vmin=0.84, vmax=1.24)
 plt.subplot(223)
 plt.imshow(recon_ir[0, 0, margin:-margin, margin:-margin], 'gray', vmin=0.84, vmax=1.24)
+
 plt.subplot(224)
 plt.imshow((recon_ir - img_ref)[0, 0, margin:-margin, margin:-margin], 'gray', vmin=-0.1, vmax=0.1)
+
+# %%
+# TV reconstruction
+ntv_iter = 1000
+nsubsets = 12
+nesterov = 0.5
+beta = 0.0001
+zero_init = True
+
+beta = 2e-4
+prj_sparse_cp = cp.array(prj_sparse, order='C')
+
+# beta = 1e-4
+# prj_sparse_cp = cp.array(prj_recon, order='C')
+
+# beta = 1e-3
+# prj_sparse_cp = cp.array(fp, order='C')
+
+projector_norm = projector_cp.calc_projector_norm()
+norm_img_cp = projector_cp.calc_norm_img() / projector_norm / projector_norm
+
+if zero_init:
+    recon_cp = cp.zeros(img_sparse.shape, cp.float32)
+    nesterov_cp = cp.zeros(img_sparse.shape, cp.float32)
+else:
+    recon_cp = cp.array(img_sparse, order='C')
+    nesterov_cp = cp.array(img_sparse, order='C')
+
+for i in range(ntv_iter):
+    for isubset in range(nsubsets):
+        inds = np.arange(isubset, len(angles_cp), nsubsets)
+        angles_current = cp.copy(angles_cp[inds], 'C')
+        prj_current = cp.copy(prj_sparse_cp[:, inds, ...], 'C')
+
+        recon_cp = ct_recon_cp.sqs_one_step(
+            projector_cp,
+            nesterov_cp,
+            prj_current,
+            norm_img_cp,
+            projector_norm,
+            beta,
+            ct_prior_cp.tv_sqs,
+            {'weights': [1, 1, 1]},
+            nsubsets,
+            {'angles': angles_current},
+            {'angles': angles_current},
+            return_loss=False
+        )
+
+        nesterov_cp = recon_cp + nesterov * (recon_cp - nesterov_cp)
+
+    _, data_loss, tv_loss = ct_recon_cp.sqs_one_step(
+        projector_cp,
+        recon_cp,
+        prj_sparse_cp,
+        norm_img_cp,
+        projector_norm,
+        beta,
+        ct_prior_cp.tv_sqs,
+        {'weights': [1, 1, 1]},
+        return_loss=True
+    )
+
+    if (i + 1) % 100 == 0:
+        print(i + 1, data_loss, tv_loss)
+
+# %%
+recon = recon_cp.get()
+plt.figure(figsize=[16, 8])
+plt.subplot(121)
+plt.imshow(img_sparse[0, 0, margin:-margin, margin:-margin], 'gray', vmin=0.84, vmax=1.24)
+plt.subplot(122)
+plt.imshow(recon[0, 0, margin:-margin, margin:-margin], 'gray', vmin=0.84, vmax=1.24)
+err_img = (recon - img_ref)
+err_img = mask_fov(err_img, fov_size)
+print(np.sqrt(np.mean(err_img**2)))
 
 # %%
