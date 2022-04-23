@@ -11,7 +11,7 @@ import SimpleITK as sitk
 import glob
 import h5py
 
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 
 import ct_projector.projector.numpy as ct_base
 import ct_projector.projector.numpy.parallel as ct_proj
@@ -32,6 +32,7 @@ def get_args(default_args=[]):
     parser.add_argument('--nview', type=int, default=2304)
 
     parser.add_argument('--device', type=int, default=0)
+    parser.add_argument('--save_prj', type=int, default=0)
 
     if 'ipykernel' in sys.argv[0]:
         args = parser.parse_args(default_args)
@@ -77,7 +78,7 @@ def main(args):
     projector_para.nview = args.nview
     angles_para = projector_para.get_angles()
 
-    filenames = glob.glob(os.path.join(input_data_dir, args.input_dir, '*_full_sino.mat'))
+    filenames = glob.glob(os.path.join(input_data_dir, args.input_dir, 'ACR_full_sino.mat'))
     print('Total files', len(filenames))
     for ifile, filename in enumerate(filenames):
         name = os.path.basename(filename).split('_')[0]
@@ -116,10 +117,12 @@ def main(args):
             for k in vars(args):
                 f.write('{0} = {1}\n'.format(k, getattr(args, k)))
 
-        save_results(
-            fp[0],
-            os.path.join(output_dir, name + '.prj.nii.gz')
-        )
+        if args.save_prj:
+            save_results(
+                fp[0],
+                os.path.join(output_dir, name + '.prj.nii.gz')
+            )
+
         save_results(
             (recons[0] / 0.019 * 1000).astype(np.int16),
             os.path.join(output_dir, name + '.nii.gz')
@@ -127,10 +130,19 @@ def main(args):
 
         print('Done', flush=True)
 
+    return refs
+
 
 # %%
 if __name__ == '__main__':
     args = get_args([
-        '--nview', '144'
+        '--nview', '2304'
     ])
-    main(args)
+
+    refs = main(args)
+
+    if args.debug:
+        plt.figure(figsize=[8, 8])
+        plt.imshow(refs[0, 30, 200:-200, 200:-200], 'gray', vmin=0, vmax=0.075)
+
+# %%
