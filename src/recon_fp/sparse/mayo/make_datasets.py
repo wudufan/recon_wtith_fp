@@ -78,7 +78,7 @@ def main(args):
     projector_para.nview = args.nview
     angles_para = projector_para.get_angles()
 
-    filenames = glob.glob(os.path.join(input_data_dir, args.input_dir, 'ACR_full_sino.mat'))
+    filenames = glob.glob(os.path.join(input_data_dir, args.input_dir, '*_full_sino.mat'))
     print('Total files', len(filenames))
     for ifile, filename in enumerate(filenames):
         name = os.path.basename(filename).split('_')[0]
