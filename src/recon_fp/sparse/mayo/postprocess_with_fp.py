@@ -24,18 +24,19 @@ def get_args(default_args=[]):
     parser = argparse.ArgumentParser()
     parser.add_argument('--input_dir', default='mayo/train/144/l2_depth_4/valid/')
     parser.add_argument('--prj_dir', default='mayo/data/144/')
+    parser.add_argument('--output_dir', default='mayo/train/144/l2_depth_4/prj_recon/')
     parser.add_argument('--name', default='L291')
     parser.add_argument('--postfix', default='.nii.gz')
     parser.add_argument('--geometry', default='./data/geometry_para.cfg')
     parser.add_argument('--nview', type=int, default=144)
 
-    parser.add_argument('--islice', type=int, default=95)
+    parser.add_argument('--islice', type=int, nargs=2, default=None)
 
     parser.add_argument('--norm', type=float, default=1000)
     parser.add_argument('--offset', type=float, default=-1)
 
-    parser.add_argument('--recover_niters', type=int, default=1000)
-    parser.add_argument('--recover_stepsize', type=float, default=0.75)
+    parser.add_argument('--recover_niters', type=int, default=1500)
+    parser.add_argument('--recover_stepsize', type=float, default=1)
     parser.add_argument('--recover_alpha', type=float, default=0.999)
     parser.add_argument('--recover_init', default='pred', choices=['zero', 'fp', 'pred', 'truth'])
 
@@ -83,12 +84,6 @@ def load_data(args):
     y = cp.array(y, order='C')
     pred = cp.array(pred, order='C')
     prj = cp.array(prj, order='C')
-
-    # debug with one slice
-    x = cp.copy(x[:, [args.islice]], 'C')
-    y = cp.copy(y[:, [args.islice]], 'C')
-    pred = cp.copy(pred[:, [args.islice]], 'C')
-    prj = cp.copy(prj[:, :, [args.islice], :], 'C')
 
     return x, y, pred, prj
 
@@ -339,13 +334,7 @@ def hann_filter(cuprj):
 
 
 # %%
-def main(args):
-    cp.random.seed(0)
-    ct_base.set_device(args.device)
-
-    print('Loading results...', flush=True)
-    x, y, pred, prj = load_data(args)
-
+def process_slice_data(args, projector, angles, x, y, pred, prj):
     prj = hann_filter(prj)
 
     if args.debug:
@@ -358,8 +347,6 @@ def main(args):
             2,
             2
         )
-
-    projector, angles = load_projector(args)
 
     # compare forward projection
     fp_x = ct_proj.distance_driven_fp(projector, x, angles)
@@ -415,11 +402,65 @@ def main(args):
             2
         )
 
-    return x, y, pred, recon
+    return recon, prj_recon
+
+
+# %%
+def main(args):
+    cp.random.seed(0)
+    cp.cuda.Device(args.device).use()
+    ct_base.set_device(args.device)
+
+    print('Loading results...', flush=True)
+    x_all, y_all, pred_all, prj_all = load_data(args)
+    projector, angles = load_projector(args)
+
+    # process slice by slice
+    if args.islice is None:
+        args.islice = [0, x_all.shape[1]]
+    print('Slices {0} to {1}'.format(args.islice[0], args.islice[1]), flush=True)
+
+    recon_all = []
+    prj_recon_all = []
+    for islice in range(args.islice[0], args.islice[1]):
+        print('Processing slice {0}...'.format(islice), flush=True)
+
+        # retrieve slice data
+        x = cp.copy(x_all[:, [islice], :, :], 'C')
+        y = cp.copy(y_all[:, [islice], :, :], 'C')
+        pred = cp.copy(pred_all[:, [islice], :, :], 'C')
+        prj = cp.copy(prj_all[:, :, [islice], :], 'C')
+
+        recon, prj_recon = process_slice_data(args, projector, angles, x, y, pred, prj)
+
+        recon_all.append(recon)
+        prj_recon_all.append(prj_recon)
+    recon_all = cp.concatenate(recon_all, 1)
+    prj_recon_all = cp.concatenate(prj_recon_all, 2)
+
+    # save results
+    output_dir = os.path.join(working_dir, args.output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    # save config file
+    with open(os.path.join(output_dir, 'running_params.log'), 'w') as f:
+        f.write(__file__ + '\n')
+        for k in vars(args):
+            f.write('{0} = {1}\n'.format(k, getattr(args, k)))
+    # save images
+    recon_np = ((recon_all.get()[0] + args.offset) * args.norm).astype(np.int16)
+    sitk_recon = sitk.GetImageFromArray(recon_np)
+    sitk.WriteImage(sitk_recon, os.path.join(output_dir, args.name + '.postir.nii.gz'))
+    # save recovered projection
+    prj_recon_np = (prj_recon_all.get()[0] * 0.019).astype(np.float32)
+    sitk_prj_recon = sitk.GetImageFromArray(prj_recon_np)
+    sitk.WriteImage(sitk_prj_recon, os.path.join(output_dir, args.name + '.prj_recon.nii.gz'))
 
 
 # %%
 if __name__ == '__main__':
+    nview = 288
+    tag = 'l2_depth_4'
+
     args = get_args([
         '--recover_init', 'pred',
         '--recover_niters', '2000',
@@ -427,10 +468,17 @@ if __name__ == '__main__':
         '--recover_alpha', '0.9999',
         '--post_niters', '100',
         '--post_nsubsets', '12',
-        '--input_dir', 'mayo/train/144/l2_depth_4/valid/',
-        '--prj_dir', 'mayo/data/144/',
-        '--nview', '144',
-        '--name', 'L291',
-        '--islice', '95',
+        '--input_dir', f'mayo/train/{nview}/{tag}/valid/',
+        '--prj_dir', f'mayo/data/{nview}/',
+        '--output_dir', f'mayo/train/{nview}/{tag}/prj_recon/',
+        '--nview', f'{nview}',
+        # '--name', 'L291',
+        # '--islice', '90', '96',
+        # '--name', 'L143',
+        # '--islice', '253',
+        '--name', 'ACR',
+        '--islice', '95', '96',
+        # '--name', 'L067',
+        # '--islice', '95',
     ])
     res = main(args)
