@@ -26,8 +26,11 @@ def get_args(default_args=[]):
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', default='data/forbild512.mat')
     parser.add_argument('--geometry', default='data/geometry_para.cfg')
+    parser.add_argument('--output_dir', default='phantom')
     parser.add_argument('--nprj_sparse', type=int, default=120)
     parser.add_argument('--start_angle', type=float, default=0)
+
+    parser.add_argument('--device', type=int, default=0)
 
     parser.add_argument('--recover_niters', type=int, default=5000)
 
@@ -351,6 +354,9 @@ def save_results(output_dir: str, results: dict, args: argparse.Namespace, vmin=
 
 # %%
 def main(args):
+    cp.cuda.Device(args.device).use()
+    ct_base.set_device(args.device)
+
     mat = scipy.io.loadmat(args.input)
     phantom = mat['ph']
     phantom = phantom[np.newaxis, np.newaxis]
@@ -498,7 +504,7 @@ def main(args):
 
     # save results
     save_results(
-        os.path.join(working_dir, 'sparse'),
+        os.path.join(working_dir, args.output_dir),
         {
             'phantom': cuphantom,
             'full': curecon_full,
@@ -517,7 +523,7 @@ def main(args):
         vmax
     )
     save_results(
-        os.path.join(working_dir, 'sparse'),
+        os.path.join(working_dir, args.output_dir),
         {
             'prj_fp_diff': cp.abs(cufp - cuprj).transpose([0, 2, 1, 3]),
             'prj_recover_diff': cp.abs(cuprj_recover - cuprj).transpose([0, 2, 1, 3]),
@@ -535,6 +541,8 @@ if __name__ == '__main__':
         '--beta_tv', '5e-4',
         '--niters', '1',
         '--recover_niters', '1',
+        '--device', '3',
+        '--output_dir', 'phantom_debug'
     ])
     main(args)
 
